@@ -16,16 +16,20 @@ variable "state_bucket" {
   default     = "oficina-api-terraform-state-728750563430"
 }
 
-variable "backend_url" {
-  description = "Base URL of the API running on Kubernetes. Leave empty to discover the NLB created by the Service"
-  type        = string
-  default     = ""
+variable "backend_urls" {
+  description = "Base URL of each microservice on Kubernetes, keyed by os, billing and execution. Leave a key out to discover the NLB created by its Service"
+  type        = map(string)
+  default     = {}
 }
 
-variable "backend_service_tag" {
-  description = "Value of the kubernetes.io/service-name tag on the NLB created by the Kubernetes Service"
-  type        = string
-  default     = "oficina-api/oficina-api"
+variable "backend_service_tags" {
+  description = "Value of the kubernetes.io/service-name tag (namespace/name) on the NLB of each microservice"
+  type        = map(string)
+  default = {
+    os        = "oficina-api/oficina-api"
+    billing   = "oficina-billing/oficina-billing-service"
+    execution = "oficina-execution/oficina-execution-service"
+  }
 }
 
 variable "token_ttl_seconds" {

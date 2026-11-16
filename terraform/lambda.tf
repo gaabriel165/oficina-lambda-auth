@@ -17,7 +17,7 @@ resource "aws_cloudwatch_log_group" "authorizer" {
 
 resource "aws_lambda_function" "auth_cpf" {
   function_name    = local.auth_cpf_function_name
-  description      = "Validates a customer CPF against the database and issues a JWT"
+  description      = "Validates a customer CPF through the service order microservice and issues a JWT"
   role             = aws_iam_role.lambda_execution.arn
   runtime          = "provided.al2023"
   architectures    = ["arm64"]
@@ -27,23 +27,18 @@ resource "aws_lambda_function" "auth_cpf" {
   memory_size      = 128
   timeout          = 10
 
-  vpc_config {
-    subnet_ids         = local.private_subnet_ids
-    security_group_ids = [local.db_client_security_group_id]
-  }
-
   environment {
     variables = {
-      DATABASE_URL      = data.aws_ssm_parameter.database_url.value
-      JWT_SECRET        = data.aws_ssm_parameter.jwt_secret.value
-      TOKEN_TTL_SECONDS = tostring(var.token_ttl_seconds)
+      CUSTOMER_API_URL    = local.backend_urls["os"]
+      INTERNAL_API_SECRET = data.aws_ssm_parameter.internal_api_secret.value
+      JWT_SECRET          = data.aws_ssm_parameter.jwt_secret.value
+      TOKEN_TTL_SECONDS   = tostring(var.token_ttl_seconds)
     }
   }
 
   depends_on = [
     aws_cloudwatch_log_group.auth_cpf,
     aws_iam_role_policy_attachment.lambda_basic_execution,
-    aws_iam_role_policy_attachment.lambda_vpc_access,
   ]
 }
 

@@ -3,22 +3,49 @@ data "aws_ssm_parameter" "jwt_secret" {
   with_decryption = true
 }
 
-data "aws_ssm_parameter" "database_url" {
-  name            = local.database_url_parameter_name
+data "aws_ssm_parameter" "internal_api_secret" {
+  name            = local.internal_api_secret_parameter_name
   with_decryption = true
 }
 
 data "aws_lbs" "backend" {
+  for_each = var.backend_service_tags
+
   tags = {
-    "kubernetes.io/service-name" = var.backend_service_tag
+    "kubernetes.io/service-name" = each.value
+  }
+}
+
+locals {
+  discovered_backend_arns = { for service, lbs in data.aws_lbs.backend : service => tolist(lbs.arns) }
+
+  discoverable_backends = {
+    for service, arns in local.discovered_backend_arns :
+    service => arns[0] if lookup(var.backend_urls, service, "") == "" && length(arns) > 0
   }
 }
 
 data "aws_lb" "backend" {
-  count = var.backend_url == "" ? 1 : 0
-  arn   = tolist(data.aws_lbs.backend.arns)[0]
+  for_each = local.discoverable_backends
+
+  arn = each.value
 }
 
 locals {
-  backend_url = var.backend_url != "" ? var.backend_url : "http://${data.aws_lb.backend[0].dns_name}"
+  backend_urls = {
+    for service in keys(var.backend_service_tags) :
+    service => lookup(var.backend_urls, service, "") != "" ? var.backend_urls[service] : (
+      contains(keys(local.discoverable_backends), service) ? "http://${data.aws_lb.backend[service].dns_name}" : "http://backend-not-found.invalid"
+    )
+  }
+}
+
+check "backend_load_balancers_present" {
+  assert {
+    condition = alltrue([
+      for service, arns in local.discovered_backend_arns :
+      lookup(var.backend_urls, service, "") != "" || length(arns) > 0
+    ])
+    error_message = "A microservice has no load balancer tagged with its kubernetes.io/service-name. Deploy the three Services first or set backend_urls."
+  }
 }

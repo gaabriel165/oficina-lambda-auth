@@ -13,7 +13,7 @@ output "authorizer_function_name" {
   value       = aws_lambda_function.authorizer.function_name
 }
 
-output "backend_url" {
-  description = "URL of the API on Kubernetes that the gateway proxies to"
-  value       = local.backend_url
+output "backend_urls" {
+  description = "URL of each microservice on Kubernetes that the gateway proxies to"
+  value       = local.backend_urls
 }
