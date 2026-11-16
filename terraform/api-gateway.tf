@@ -83,7 +83,7 @@ locals {
     "POST /api/v1/auth/login"                = "os"
     "POST /api/v1/auth/register"             = "os"
     "GET /api/v1/service-orders/{id}/status" = "os"
-    "POST /webhooks/mercadopago"             = "billing"
+    "POST /api/v1/webhooks/mercadopago"      = "billing"
   }
 
   protected_routes = {
