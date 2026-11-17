@@ -1,8 +1,12 @@
 region       = "us-east-1"
 project_name = "oficina-api"
 
-# Leave empty to discover the NLB created by the Kubernetes Service oficina-api/oficina-api.
-# backend_url = "http://xxxxxxxx-yyyyyyyy.elb.us-east-1.amazonaws.com"
+# Leave a service out to discover the NLB created by its Kubernetes Service.
+# backend_urls = {
+#   os        = "http://xxxxxxxx-yyyyyyyy.elb.us-east-1.amazonaws.com"
+#   billing   = "http://xxxxxxxx-yyyyyyyy.elb.us-east-1.amazonaws.com"
+#   execution = "http://xxxxxxxx-yyyyyyyy.elb.us-east-1.amazonaws.com"
+# }
 
 # token_ttl_seconds            = 3600
 # log_retention_days           = 7

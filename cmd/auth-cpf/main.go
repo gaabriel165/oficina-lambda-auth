@@ -17,12 +17,11 @@ import (
 	"github.com/gabrielcamargo/oficina-lambda-auth/internal/customer"
 	"github.com/gabrielcamargo/oficina-lambda-auth/internal/httpresponse"
 	"github.com/gabrielcamargo/oficina-lambda-auth/internal/token"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const (
 	defaultTokenTTLSeconds = 3600
-	databaseTimeout        = 5 * time.Second
+	customerLookupTimeout  = 5 * time.Second
 )
 
 type authRequest struct {
@@ -49,14 +48,13 @@ var (
 func main() {
 	logger = slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("function", "auth-cpf")
 
-	pool, err := pgxpool.New(context.Background(), os.Getenv("DATABASE_URL"))
-	if err != nil {
-		logger.Error("database pool creation failed", "error", err.Error())
-		os.Exit(1)
-	}
-
+	customers := customer.NewHTTPRepository(
+		&http.Client{Timeout: customerLookupTimeout},
+		os.Getenv("CUSTOMER_API_URL"),
+		os.Getenv("INTERNAL_API_SECRET"),
+	)
 	issuer := token.NewIssuer(os.Getenv("JWT_SECRET"), tokenTTL())
-	authenticator = auth.NewAuthenticator(customer.NewPostgresRepository(pool), issuer)
+	authenticator = auth.NewAuthenticator(customers, issuer)
 
 	lambda.Start(handle)
 }
@@ -77,10 +75,7 @@ func handle(ctx context.Context, request events.APIGatewayV2HTTPRequest) (events
 		return httpresponse.Error(http.StatusBadRequest, "invalid cpf"), nil
 	}
 
-	dbCtx, cancel := context.WithTimeout(ctx, databaseTimeout)
-	defer cancel()
-
-	result, err := authenticator.Authenticate(dbCtx, digits)
+	result, err := authenticator.Authenticate(ctx, digits)
 	if err != nil {
 		return mapError(requestLogger, maskedCPF, err), nil
 	}
@@ -102,6 +97,10 @@ func mapError(requestLogger *slog.Logger, maskedCPF string, err error) events.AP
 	if errors.Is(err, auth.ErrCustomerInactive) {
 		requestLogger.Warn("authentication rejected", "event", "auth.cpf", "cpf_masked", maskedCPF, "outcome", "customer_inactive")
 		return httpresponse.Error(http.StatusForbidden, "customer is not active")
+	}
+	if errors.Is(err, customer.ErrCustomerServiceUnavailable) {
+		requestLogger.Error("authentication failed", "event", "auth.cpf", "cpf_masked", maskedCPF, "outcome", "customer_service_unavailable", "error", err.Error())
+		return httpresponse.Error(http.StatusBadGateway, "customer service unavailable")
 	}
 	requestLogger.Error("authentication failed", "event", "auth.cpf", "cpf_masked", maskedCPF, "outcome", "error", "error", err.Error())
 	return httpresponse.Error(http.StatusInternalServerError, "internal server error")

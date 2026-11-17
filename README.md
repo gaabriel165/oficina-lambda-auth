@@ -3,13 +3,15 @@
 [![CI](https://github.com/gaabriel165/oficina-lambda-auth/actions/workflows/ci.yml/badge.svg)](https://github.com/gaabriel165/oficina-lambda-auth/actions/workflows/ci.yml)
 [![CD](https://github.com/gaabriel165/oficina-lambda-auth/actions/workflows/cd.yml/badge.svg)](https://github.com/gaabriel165/oficina-lambda-auth/actions/workflows/cd.yml)
 
-Repositório da **Function Serverless de autenticação** e do **API Gateway** do Tech Challenge da pós-graduação em Arquitetura de Software (FIAP SOAT) — Fase 3. É um dos quatro repositórios do projeto:
+Repositório da **Function Serverless de autenticação** e do **API Gateway** do Tech Challenge da pós-graduação em Arquitetura de Software (FIAP SOAT) — Fases 3 e 4. É um dos seis repositórios do projeto:
 
 | Repositório | Papel |
 |---|---|
-| [`oficina-api`](https://github.com/gaabriel165/oficina-api) | Aplicação principal (Go) executando em Kubernetes |
+| [`oficina-os-service`](https://github.com/gaabriel165/oficina-os-service) | Ordens de serviço, clientes, veículos e orquestração da saga |
+| [`oficina-billing-service`](https://github.com/gaabriel165/oficina-billing-service) | Orçamento e pagamento |
+| [`oficina-execution-service`](https://github.com/gaabriel165/oficina-execution-service) | Diagnóstico, execução, catálogo e estoque |
 | [`oficina-infra-k8s`](https://github.com/gaabriel165/oficina-infra-k8s) | VPC, EKS, ECR e roles OIDC (Terraform) |
-| [`oficina-infra-db`](https://github.com/gaabriel165/oficina-infra-db) | RDS PostgreSQL gerenciado (Terraform) |
+| [`oficina-infra-db`](https://github.com/gaabriel165/oficina-infra-db) | RDS PostgreSQL do OS Service (Terraform) |
 | **`oficina-lambda-auth`** (este) | Lambda de autenticação por CPF, Lambda authorizer e API Gateway |
 
 ## Propósito
@@ -17,20 +19,37 @@ Repositório da **Function Serverless de autenticação** e do **API Gateway** d
 O cliente da oficina se identifica apenas com o **CPF**. A função `auth-cpf`:
 
 1. Valida o CPF (dígitos verificadores, rejeita sequências repetidas);
-2. Consulta a **existência** e o **status** do cliente no banco (RDS PostgreSQL, tabela `customers`);
+2. Consulta a **existência** e o **status** do cliente no OS Service, pela rota interna `GET /internal/customers/by-document/{document}` (autenticada com o cabeçalho `X-Internal-Secret`);
 3. Emite um **JWT** (HS256, 1 h) aceito pelas APIs protegidas.
 
-O **API Gateway** é a única porta de entrada: expõe a rota de autenticação e faz o roteamento para a API no EKS. Rotas sensíveis (`/api/v1/*`) passam pelo **Lambda authorizer**, que valida o JWT antes de encaminhar. Rotas públicas (login administrativo, consulta de status, webhook, health e Swagger) seguem direto.
+O **API Gateway** é a única porta de entrada: expõe a rota de autenticação e roteia cada caminho para o microsserviço dono do recurso no EKS. Rotas sensíveis (`/api/v1/*`) passam pelo **Lambda authorizer**, que valida o JWT antes de encaminhar. Rotas públicas (login administrativo, consulta de status, webhook do Mercado Pago, health e Swagger) seguem direto.
+
+Na Fase 4 a função deixou de acessar o banco de dados: cada microsserviço é dono dos seus dados, então a consulta de cliente passou a ser uma chamada REST ao OS Service. Com isso a Lambda saiu da VPC e este repositório não depende mais do `oficina-infra-db`.
+
+### Roteamento
+
+| Rota | Autenticação na borda | Destino |
+|---|---|---|
+| `POST /auth/cpf` | nenhuma | Lambda `auth-cpf` |
+| `GET /health`, `GET /swagger/{proxy+}` | nenhuma | OS Service |
+| `POST /api/v1/auth/login`, `POST /api/v1/auth/register` | nenhuma | OS Service |
+| `GET /api/v1/service-orders/{id}/status` | nenhuma | OS Service |
+| `POST /api/v1/webhooks/mercadopago` | assinatura `x-signature`, validada pelo Billing Service | Billing Service |
+| `ANY /api/v1/budgets`, `/budgets/{proxy+}`, `/payments/{proxy+}` | Lambda authorizer | Billing Service |
+| `ANY /api/v1/parts`, `/services`, `/work-orders` e subcaminhos | Lambda authorizer | Execution Service |
+| `ANY /api/v1/{proxy+}` | Lambda authorizer | OS Service |
+
+O API Gateway escolhe a rota mais específica, então os caminhos do Billing e do Execution têm prioridade sobre o `ANY /api/v1/{proxy+}` do OS Service.
 
 ## Tecnologias
 
 | Categoria | Tecnologias |
 |---|---|
 | Runtime | Go 1.25, AWS Lambda (`provided.al2023`, arm64) |
-| Bibliotecas | `aws-lambda-go`, `pgx/v5`, `golang-jwt/v5`, `log/slog` (logs JSON) |
-| Gateway | AWS API Gateway **HTTP API** (integração Lambda proxy + HTTP proxy para o NLB do EKS) |
-| Segredos | AWS SSM Parameter Store (`/oficina-api/jwt_secret`, `/oficina-api/database_url`) |
-| IaC | Terraform (state remoto em S3, lê os states de `oficina-infra-k8s` e `oficina-infra-db`) |
+| Bibliotecas | `aws-lambda-go`, `net/http`, `golang-jwt/v5`, `log/slog` (logs JSON) |
+| Gateway | AWS API Gateway **HTTP API** (integração Lambda proxy + HTTP proxy para o NLB de cada microsserviço) |
+| Segredos | AWS SSM Parameter Store (`/oficina-api/jwt_secret`, `/oficina-api/internal_api_secret`) |
+| IaC | Terraform (state remoto em S3, lê o state de `oficina-infra-k8s`) |
 | CI/CD | GitHub Actions com OIDC (sem chave estática) |
 | Testes | Testify |
 
@@ -44,19 +63,19 @@ sequenceDiagram
     participant C as Cliente
     participant GW as API Gateway (HTTP API)
     participant L as Lambda auth-cpf
-    participant DB as RDS PostgreSQL
+    participant OS as OS Service
 
     C->>GW: POST /auth/cpf {"cpf": "987.654.321-00"}
     GW->>L: invoke (payload v2)
     L->>L: valida dígitos verificadores do CPF
-    L->>DB: SELECT id, name, status FROM customers WHERE document = $1
-    DB-->>L: cliente (status = active)
+    L->>OS: GET /internal/customers/by-document/98765432100 (X-Internal-Secret)
+    OS-->>L: 200 {id, name, status: active}
     L->>L: assina JWT HS256 (sub, cpf, name, role=customer, exp 1h)
     L-->>GW: 200 {token, token_type, expires_in, customer}
     GW-->>C: 200 {token, ...}
 ```
 
-Respostas possíveis: `400` CPF inválido ou body inválido · `404` cliente não encontrado · `403` cliente inativo · `500` erro interno.
+Respostas possíveis: `400` CPF inválido ou body inválido · `404` cliente não encontrado · `403` cliente inativo · `502` OS Service indisponível · `500` erro interno.
 
 ### Consumo de rota protegida
 
@@ -66,13 +85,13 @@ sequenceDiagram
     participant C as Cliente
     participant GW as API Gateway
     participant A as Lambda authorizer
-    participant API as oficina-api (EKS)
+    participant API as Microsserviço (EKS)
 
     C->>GW: GET /api/v1/service-orders  (Authorization: Bearer <jwt>)
     GW->>A: REQUEST authorizer (identity source: header Authorization)
     A->>A: valida assinatura HS256 + exp
     A-->>GW: {isAuthorized: true, context: {sub, role}}
-    GW->>API: proxy HTTP para o NLB (path preservado)
+    GW->>API: proxy HTTP para o NLB do serviço dono da rota (path preservado)
     API->>API: middleware JWT valida o mesmo token
     API-->>GW: 200 [...]
     GW-->>C: 200 [...]
@@ -84,36 +103,40 @@ O API Gateway cacheia a decisão do authorizer por 5 minutos para o mesmo header
 
 ```mermaid
 flowchart LR
-    Client[Cliente]
+    Client[Cliente e operador]
+    MP[Mercado Pago]
 
     subgraph AWS["AWS us-east-1"]
         subgraph GW["API Gateway HTTP API"]
-            PUB["Rotas públicas<br/>GET /health · GET /swagger/*<br/>POST /api/v1/auth/login · /register<br/>GET /api/v1/service-orders/{id}/status<br/>POST /api/v1/service-orders/{id}/budget-approval"]
             AUTH["POST /auth/cpf"]
-            PROT["ANY /api/v1/{proxy+}<br/>(Lambda authorizer)"]
+            PUB["Rotas públicas<br/>health, swagger, login, status da OS<br/>webhook do Mercado Pago"]
+            PROT["Rotas /api/v1 protegidas<br/>(Lambda authorizer)"]
         end
-        LA["Lambda auth-cpf<br/>(na VPC)"]
+        LA["Lambda auth-cpf"]
         LZ["Lambda authorizer"]
-        SSM[(SSM Parameter Store<br/>jwt_secret · database_url)]
-        subgraph VPC["VPC (oficina-infra-k8s)"]
-            NLB[NLB do Service oficina-api]
-            EKS[EKS · pods oficina-api]
-            RDS[(RDS PostgreSQL<br/>oficina-infra-db)]
+        SSM[(SSM Parameter Store<br/>jwt_secret · internal_api_secret<br/>api_gateway_url)]
+        subgraph EKS["EKS (oficina-infra-k8s)"]
+            OS["NLB + oficina-os-service"]
+            BILLING["NLB + oficina-billing-service"]
+            EXECUTION["NLB + oficina-execution-service"]
         end
     end
 
-    Client --> PUB
     Client --> AUTH
+    Client --> PUB
     Client --> PROT
+    MP --> PUB
     AUTH --> LA
+    LA -->|"consulta de cliente"| OS
     PROT -. valida JWT .-> LZ
-    PUB --> NLB
-    PROT --> NLB
-    NLB --> EKS
-    EKS --> RDS
-    LA --> RDS
+    PUB --> OS
+    PUB --> BILLING
+    PROT --> OS
+    PROT --> BILLING
+    PROT --> EXECUTION
     SSM -. env vars no deploy .-> LA
     SSM -. env vars no deploy .-> LZ
+    GW -. publica a URL .-> SSM
 ```
 
 Estrutura de pastas:
@@ -122,7 +145,7 @@ Estrutura de pastas:
 cmd/auth-cpf/          → handler da autenticação por CPF
 cmd/authorizer/        → handler do Lambda authorizer
 internal/cpf/          → validação e mascaramento de CPF
-internal/customer/     → modelo + repositório PostgreSQL (pgx)
+internal/customer/     → modelo + repositório HTTP (consulta ao OS Service)
 internal/token/        → emissão e verificação do JWT
 internal/auth/         → caso de uso Authenticate (CPF → cliente ativo → token)
 internal/httpresponse/ → respostas JSON do API Gateway
@@ -159,9 +182,10 @@ A branch `main` é protegida: sem commits diretos, merge somente via Pull Reques
 
 Este repositório é o **último** a subir e o **primeiro** a descer:
 
-1. `oficina-infra-k8s` aplicado (state `k8s/`): VPC, subnets privadas e o parâmetro `/oficina-api/jwt_secret`.
-2. `oficina-infra-db` aplicado (state `db/`): security group de cliente do banco e `/oficina-api/database_url`.
-3. `oficina-api` deployado no EKS: o Service `oficina-api` cria o NLB, descoberto pela tag `kubernetes.io/service-name = oficina-api/oficina-api`. Alternativamente informe `backend_url` em `terraform.tfvars`.
+1. `oficina-infra-k8s` aplicado (state `k8s/`): parâmetros `/oficina-api/jwt_secret` e `/oficina-api/internal_api_secret`.
+2. Os três microsserviços deployados no EKS: cada `Service` cria um NLB, descoberto pela tag `kubernetes.io/service-name` (`oficina-api/oficina-api`, `oficina-billing/oficina-billing-service` e `oficina-execution/oficina-execution-service`). Alternativamente informe `backend_urls` em `terraform.tfvars`.
+
+Depois do primeiro `apply`, a URL do gateway fica em `/oficina-api/api_gateway_url`. O Billing Service lê esse parâmetro no deploy para montar o endereço do webhook do Mercado Pago, então o CD dele deve ser executado de novo quando o gateway é recriado.
 
 ### Deploy manual
 
@@ -200,7 +224,7 @@ curl -s -X POST "$GW/auth/cpf" -H "Content-Type: application/json" -d '{"cpf":"5
 
 ## Destruir o ambiente
 
-A infraestrutura é provisionada **sob demanda** (o ambiente sobe para testes e gravação e é destruído em seguida para não gerar custo). Ordem de destroy: **este repositório primeiro**, depois `oficina-infra-db`, por último `oficina-infra-k8s`.
+A infraestrutura é provisionada **sob demanda** (o ambiente sobe para testes e gravação e é destruído em seguida para não gerar custo). Ordem de destroy: **este repositório primeiro**, depois os três microsserviços (CD com a ação `destroy`), `oficina-infra-db` e, por último, `oficina-infra-k8s`.
 
 ```bash
 terraform -chdir=terraform destroy
